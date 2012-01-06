@@ -369,6 +369,49 @@ int16_t usb_serial_getchar(void)
   return c;
 }
 
+/*******************
+ * Reads until a packet terminator or there are no more bytes available
+ * 
+ * @return number of bytes in the packet (including term_byte if end-of-packet reached)
+ */
+uint8_t usb_serial_getpacket(void *const dst, uint8_t len, const uint8_t term_byte) {
+  uint8_t intr_state, n, c, *end = dst + len, *start = dst;
+  
+  // interrupts are disabled so these functions can be
+  // used from the main program or interrupt context,
+  // even both in the same program!
+  intr_state = SREG;
+  cli();
+  if (!usb_configuration) {
+    SREG = intr_state;
+    return -1;
+  }
+  //Select the RX endpoint
+  UENUM = CDC_RX_ENDPOINT;
+
+  //Flip banks if there's nothing in the current one
+  if(!bit_is_set(UEINTX, RWAL)) UEINTX = 0x6B;
+
+  while(bit_is_set(UEINTX, RWAL)) {
+    n = UEBCLX;
+    while(n) {
+      //Full packet buffer
+      if(dst == end) goto break_out;
+      //Read a byte
+      *start++ = c = UEDATX;
+      n--;
+      //Stop at a termination byte
+      if(c == term_byte) goto break_out;
+    }
+    //Only reach here if n == 0, so flip banks
+    UEINTX = 0x6B;
+  }
+  //Termination and return stuff
+  break_out: 
+  SREG = intr_state;
+  return end - start;
+}
+
 // number of bytes available in the receive buffer
 uint8_t usb_serial_available(void)
 {
@@ -642,6 +685,62 @@ int8_t usb_serial_write(const uint8_t *buffer, uint16_t size)
     SREG = intr_state;
   }
   return 0;
+}
+
+static inline uint8_t min8(uint8_t a, uint8_t b) { return (a > b) ? b : a; }
+
+/**
+ * A writes to the USB buffer non-blocking, returning the number of 
+ * characters successfully written. The function will never write more
+ * than 255 bytes in a single call. 
+ *
+ * Note, this function is not as fast as it could be, best used for low-throughput 
+ * applications
+ *
+ * @param write_f A function called successively to output bytes. Should write
+ *                to the given destination point repeatedly up to maxlen. If it writes
+ *                less than maxlen, it is assumed to have completed and will not be called
+ *                again. Should return number of bytes written
+ *
+ *
+ */
+uint8_t usb_serial_write_nb(const usb_next_chars_f write_f, void *restrict state) {
+  uint8_t intr_state, write_amt = 0, ret = 0xFF, write_size;
+  if(!usb_configuration) return 0; //USB went offline
+  
+  intr_state = SREG;
+  cli();
+  //Select the TX endpont
+  UENUM = CDC_TX_ENDPOINT;
+
+  //See if there's space for writing
+  if(!bit_is_set(UEINTX, RWAL)) {
+    SREG = intr_state;
+    return 0;
+  }
+  
+  //Loop, first write is guaranteed by above check
+  do {
+    //Determine space in current frame
+    write_size = min8(CDC_TX_SIZE - UEBCLX, ret);
+
+    write_amt = write_f(&UEDATX, state, write_size);
+    ret -= write_amt;
+    
+    //buffer filled up
+    if(!bit_is_set(UEINTX, RWAL)) { 
+      UEINTX = 0x3A; //Queues bank for TX, flips to another if avail
+      transmit_flush_timer = TRANSMIT_FLUSH_TIMEOUT;
+    }
+  //Continue until FF limit reached, write_f doesn't send in entirety, or bank is full
+  } while(ret && (write_amt == write_size) && bit_is_set(UEINTX, RWAL));
+  
+  // if this completed a packet, transmit it now!
+  if (!(UEINTX & (1<<RWAL))) UEINTX = 0x3A;
+  // Reset the flush timer
+  transmit_flush_timer = TRANSMIT_FLUSH_TIMEOUT;
+  SREG = intr_state;
+  return 0xFF - ret;
 }
 
 

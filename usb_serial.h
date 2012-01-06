@@ -9,14 +9,20 @@ uint8_t usb_configured(void);		// is the USB port configured
 
 // receiving data
 int16_t usb_serial_getchar(void);	// receive a character (-1 if timeout/error)
+uint8_t usb_serial_getpacket(void *const dst, uint8_t len, const uint8_t term_byte); //Read up to len, term_byte, or all avail bytes
 uint8_t usb_serial_available(void);	// number of bytes in receive buffer
 void usb_serial_flush_input(void);	// discard any buffered input
 
 // transmitting data
+
+//Function pointer type for non-blocking write
+typedef uint8_t(*usb_next_chars_f)(volatile uint8_t * const restrict dst, void * restrict state, uint8_t maxlen);
+
 int8_t usb_serial_putchar(uint8_t c);	// transmit a character
 int8_t usb_serial_putchar_nowait(uint8_t c);  // transmit a character, do not wait
 int8_t usb_serial_write_available(void); // How much space is available in the buffer?
 int8_t usb_serial_write(const uint8_t *buffer, uint16_t size); // transmit a buffer
+uint8_t usb_serial_write_nb(const usb_next_chars_f write_f, void *restrict state); //writes as many bytes as possible using write_f
 void usb_serial_flush_output(void);	// immediately transmit any buffered output
 
 // serial parameters
